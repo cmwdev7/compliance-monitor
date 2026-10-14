@@ -1,39 +1,127 @@
+using ComplianceMonitor.Api.Data;
+using ComplianceMonitor.Api.Models;
+using ComplianceMonitor.Api.Services;
+using Microsoft.EntityFrameworkCore;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
+builder.Services.AddDbContext<ComplianceDbContext>(options =>
+    options.UseSqlite("Data Source=compliance.db"));
+
+builder.Services.AddHttpClient<
+    IComplianceClassifier,
+    HuggingFaceComplianceClassifier>(client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(60);
+});
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+app.MapPost("/analyze", async (
+    AnalyzeRequest request,
+    IComplianceClassifier classifier,
+    ComplianceDbContext db,
+    CancellationToken cancellationToken) =>
 {
-    app.MapOpenApi();
-}
+    if (string.IsNullOrWhiteSpace(request.Action) ||
+        string.IsNullOrWhiteSpace(request.Guideline))
+    {
+        return Results.BadRequest(new
+        {
+            error = "Action and guideline are required."
+        });
+    }
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+    ClassificationResult classification;
 
-app.MapGet("/weatherforecast", () =>
+    try
+    {
+        classification = await classifier.ClassifyAsync(
+            request.Action,
+            request.Guideline,
+            cancellationToken);
+    }
+    catch (HttpRequestException)
+    {
+        return Results.Problem(
+            "The classification service is unavailable.",
+            statusCode: 502);
+    }
+    catch (TaskCanceledException)
+        when (!cancellationToken.IsCancellationRequested)
+    {
+        return Results.Problem(
+            "The classification service timed out.",
+            statusCode: 504);
+    }
+
+    var record = new AnalysisRecord
+    {
+        Action = request.Action,
+        Guideline = request.Guideline,
+        Result = classification.Result,
+        Confidence = classification.Confidence,
+        Timestamp = DateTime.UtcNow
+    };
+
+    db.Analyses.Add(record);
+    await db.SaveChangesAsync(cancellationToken);
+
+    var result = new AnalyzeResponse(
+        record.Action,
+        record.Guideline,
+        record.Result,
+        record.Confidence,
+        record.Timestamp);
+
+    return Results.Ok(result);
+});
+
+app.MapGet("/history", async (ComplianceDbContext db) =>
 {
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
+    var history = await db.Analyses
+        .AsNoTracking()
+        .OrderByDescending(record => record.Timestamp)
+        .Select(record => new AnalyzeResponse(
+            record.Action,
+            record.Guideline,
+            record.Result,
+            record.Confidence,
+            record.Timestamp))
+        .ToListAsync();
+
+    return Results.Ok(history);
+});
+
+app.MapGet("/summary", async (ComplianceDbContext db) =>
+{
+    var counts = await db.Analyses
+        .AsNoTracking()
+        .GroupBy(record => record.Result)
+        .Select(group => new
+        {
+            Result = group.Key,
+            Count = group.Count()
+        })
+        .ToListAsync();
+
+    var byResult = new Dictionary<string, int>
+    {
+        ["COMPLIES"] = 0,
+        ["DEVIATES"] = 0,
+        ["UNCLEAR"] = 0
+    };
+
+    foreach (var count in counts)
+    {
+        byResult[count.Result] = count.Count;
+    }
+
+    return Results.Ok(new SummaryResponse(
+        byResult.Values.Sum(),
+        byResult));
+});
 
 app.Run();
 
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
+public partial class Program { }
