@@ -8,7 +8,7 @@ namespace ComplianceMonitor.Api.Services;
 public class HuggingFaceComplianceClassifier : IComplianceClassifier
 {
     private const string Url =
-        "https://router.huggingface.co/hf-inference/models/facebook/bart-large-mnli"\;
+        "https://router.huggingface.co/hf-inference/models/facebook/bart-large-mnli";
 
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _configuration;
