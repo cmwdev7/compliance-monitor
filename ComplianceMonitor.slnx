@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="ComplianceMonitor.Api/ComplianceMonitor.Api.csproj" />
+  <Project Path="ComplianceMonitor.Client/ComplianceMonitor.Client.csproj" />
+  <Project Path="ComplianceMonitor.Tests/ComplianceMonitor.Tests.csproj" />
+</Solution>
