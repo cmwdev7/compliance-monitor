@@ -89,14 +89,134 @@ public class ClassifierTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => Create(new FakeHandler(.9, body: body)).ClassifyAsync("Action", "Servers must restart"));
     }
 
+    [Theory]
+    [InlineData(.95, .30, "DEVIATES", .30, false)]
+    [InlineData(.30, .95, "DEVIATES", .30, false)]
+    [InlineData(.95, .70, "COMPLIES", .70, false)]
+    [InlineData(.95, .55, "COMPLIES", .55, false)]
+    [InlineData(.95, .5499, "DEVIATES", .5499, false)]
+    [InlineData(.95, .30, "DEVIATES", .30, true)]
+    [InlineData(.30, .95, "DEVIATES", .30, true)]
+    [InlineData(.95, .70, "COMPLIES", .70, true)]
+    public async Task UsesWeakestRequirementRegardlessOfResponseOrder(
+        double first, double second, string expected, double weakest, bool reverse)
+    {
+        var handler = new FakeHandler(.9, perLabelScores: [first, second], reverse: reverse);
+        var result = await Create(handler).ClassifyAsync(
+            "Restarted servers and reviewed logs", "Servers must restart. Operators must review logs.");
+        Assert.Equal(2, handler.LabelCount);
+        Assert.Equal(expected, result.Result);
+        Assert.Equal(weakest, result.Confidence);
+    }
+
+    [Fact]
+    public async Task RecurrenceOverrideRetainsWeakestOfDifferentScores()
+    {
+        var result = await Create(new FakeHandler(.9, perLabelScores: [.99, .85])).ClassifyAsync(
+            "Restarted servers and reviewed logs", "Servers must restart weekly. Operators must review logs.");
+        Assert.Equal("DEVIATES", result.Result);
+        Assert.Equal(.85, result.Confidence);
+    }
+
+    [Fact]
+    public async Task MissingTokenFailsBeforeSending()
+    {
+        var handler = new FakeHandler(.9);
+        var classifier = new HuggingFaceComplianceClassifier(new HttpClient(handler), new ConfigurationBuilder().Build());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => classifier.ClassifyAsync("Action", "Servers must restart"));
+        Assert.Equal(0, handler.Calls);
+    }
+
+    [Theory]
+    [InlineData("No guidelines exist for this case.")]
+    [InlineData("Servers should restart")]
+    public async Task LocalUnclearDoesNotRequireToken(string guideline)
+    {
+        var handler = new FakeHandler(.9);
+        var classifier = new HuggingFaceComplianceClassifier(new HttpClient(handler), new ConfigurationBuilder().Build());
+        Assert.Equal("UNCLEAR", (await classifier.ClassifyAsync("Action", guideline)).Result);
+        Assert.Equal(0, handler.Calls);
+    }
+
+    [Theory]
+    [InlineData(401)]
+    [InlineData(402)]
+    [InlineData(429)]
+    [InlineData(503)]
+    public async Task UpstreamErrorsPropagateWithoutRetry(int status)
+    {
+        var handler = new FakeHandler(.9, (HttpStatusCode)status);
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => Create(handler).ClassifyAsync("Action", "Servers must restart"));
+        Assert.Equal((HttpStatusCode)status, error.StatusCode);
+        Assert.Equal(1, handler.Calls);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("<html>unavailable</html>")]
+    [InlineData("[{\"label\":")]
+    public async Task RejectsInvalidJsonWithoutRetry(string body)
+    {
+        var handler = new FakeHandler(.9, body: body);
+        await Assert.ThrowsAnyAsync<JsonException>(() => Create(handler).ClassifyAsync("Action", "Servers must restart"));
+        Assert.Equal(1, handler.Calls);
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("null")]
+    [InlineData("[{\"label\":null,\"score\":0.9}]")]
+    [InlineData("[{\"label\":\"The reported action establishes that Servers restart\",\"score\":null}]")]
+    [InlineData("[{\"label\":\"The reported action establishes that Servers restart\",\"score\":1e999}]")]
+    public async Task RejectsEmptyNullAndNonfiniteResponses(string body)
+    {
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Create(new FakeHandler(.9, body: body))
+            .ClassifyAsync("Action", "Servers must restart"));
+    }
+
+    [Fact]
+    public async Task MissingOneOfMultipleRequirementScoresIsRejected()
+    {
+        const string body = "[{\"label\":\"The reported action establishes that Servers restart\",\"score\":0.9}]";
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Create(new FakeHandler(.9, body: body))
+            .ClassifyAsync("Action", "Servers must restart. Operators must review logs."));
+    }
+
+    [Fact]
+    public async Task CallerCancellationReachesHttpHandlerWithoutRetry()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var reached = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new FakeHandler(.9, beforeResponse: async token =>
+        {
+            using var registration = token.Register(() => observed.TrySetResult());
+            reached.TrySetResult(token);
+            await Task.Delay(Timeout.Infinite, token);
+        });
+        var pending = Create(handler).ClassifyAsync("Action", "Servers must restart", cancellation.Token);
+        try
+        {
+            Assert.True((await reached.Task.WaitAsync(TimeSpan.FromSeconds(5))).CanBeCanceled);
+            cancellation.Cancel();
+            await observed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(1, handler.Calls);
+        }
+        finally { cancellation.Cancel(); }
+    }
+
     private static HuggingFaceComplianceClassifier Create(FakeHandler handler) => new(new HttpClient(handler), new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["HuggingFace:Token"] = "test-placeholder" }).Build());
 
-    private sealed class FakeHandler(double score, HttpStatusCode status = HttpStatusCode.OK, bool empty = false, string? body = null) : HttpMessageHandler
+    private sealed class FakeHandler(double score, HttpStatusCode status = HttpStatusCode.OK, bool empty = false, string? body = null, double[]? perLabelScores = null, bool reverse = false, Func<CancellationToken, Task>? beforeResponse = null) : HttpMessageHandler
     {
         public string? Input { get; private set; }
         public int LabelCount { get; private set; }
+        public int Calls { get; private set; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            Calls++;
+            if (beforeResponse is not null) await beforeResponse(cancellationToken);
             using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
             Input = json.RootElement.GetProperty("inputs").GetString();
             var parameters = json.RootElement.GetProperty("parameters");
@@ -104,7 +224,12 @@ public class ClassifierTests
             Assert.Equal("{}", parameters.GetProperty("hypothesis_template").GetString());
             var labels = parameters.GetProperty("candidate_labels").EnumerateArray().Select(x => x.GetString()).ToArray();
             LabelCount = labels.Length;
-            return new HttpResponseMessage(status) { Content = body is null ? JsonContent.Create(empty ? [] : labels.Select(label => new { label, score }).ToArray()) : new StringContent(body) };
+            var results = labels.Select((label, index) => new { label, score = perLabelScores?[index] ?? score }).ToArray();
+            if (reverse) Array.Reverse(results);
+            return new HttpResponseMessage(status)
+            {
+                Content = body is null ? JsonContent.Create(empty ? [] : results) : new StringContent(body)
+            };
         }
     }
 }

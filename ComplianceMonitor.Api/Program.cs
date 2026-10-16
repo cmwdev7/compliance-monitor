@@ -17,6 +17,41 @@ builder.Services.AddHttpClient<
 
 var app = builder.Build();
 
+// Validate body-encoding headers before Minimal API request binding.
+app.Use(async (context, next) =>
+{
+    if (HttpMethods.IsPost(context.Request.Method)
+        && string.Equals(context.Request.Path.Value?.TrimEnd('/'), "/analyze", StringComparison.OrdinalIgnoreCase))
+    {
+        var encodings = context.Request.Headers.ContentEncoding
+            .SelectMany(value => (value ?? "").Split(','));
+        if (encodings.Any(value => !string.Equals(value.Trim(), "identity", StringComparison.OrdinalIgnoreCase)))
+        {
+            await Results.Problem("Request content encoding is not supported.", statusCode: 415).ExecuteAsync(context);
+            return;
+        }
+
+        if (System.Net.Http.Headers.MediaTypeHeaderValue.TryParse(context.Request.ContentType, out var contentType)
+            && !string.IsNullOrEmpty(contentType.CharSet))
+        {
+            try
+            {
+                var charset = contentType.CharSet.Trim('"');
+                _ = System.Text.Encoding.GetEncoding(charset);
+                // Normalize a valid quoted charset before framework JSON binding.
+                contentType.CharSet = charset;
+                context.Request.ContentType = contentType.ToString();
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException)
+            {
+                await Results.Problem("Request charset is not supported.", statusCode: 400).ExecuteAsync(context);
+                return;
+            }
+        }
+    }
+    await next(context);
+});
+
 app.MapPost("/analyze", async (
     AnalyzeRequest request,
     IComplianceClassifier classifier,
@@ -47,7 +82,7 @@ app.MapPost("/analyze", async (
             "The classification service is unavailable.",
             statusCode: 502);
     }
-    catch (TaskCanceledException)
+    catch (OperationCanceledException)
         when (!cancellationToken.IsCancellationRequested)
     {
         return Results.Problem(
