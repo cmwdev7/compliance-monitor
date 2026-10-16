@@ -103,11 +103,19 @@ To run the live acceptance test using inference credits:
 RUN_LIVE_ACCEPTANCE=1 dotnet test --filter SuppliedCasesPassLiveAcceptance
 ```
 
+In PowerShell, set `$env:RUN_LIVE_ACCEPTANCE = "1"`, run `dotnet test --filter SuppliedCasesPassLiveAcceptance`, then set `$env:RUN_LIVE_ACCEPTANCE = "0"` afterward to disable paid tests.
+
+For agent-assisted development, [the classifier review skill](.agents/skills/review-compliance-classifier/SKILL.md) defines checks for extraction, scoring, error handling, and regression coverage. It is optional and is not required to run the application or tests.
+
 ## API
 
 - `POST /analyze`: JSON `action` and `guideline`; returns those fields, `result`, `confidence`, and UTC `timestamp`. Empty inputs return 400; upstream failures return 502 and timeouts return 504.
 - `GET /history`: analyses ordered by descending timestamp.
 - `GET /summary`: total and counts for COMPLIES, DEVIATES, UNCLEAR, including zero counts.
+
+Send analysis requests as JSON with `Content-Type: application/json`. Invalid bodies or unknown charsets return `400`; unsupported media types or content encodings return `415`. Request-body compression is not supported.
+
+Upstream inference has a 60-second timeout. Unavailable services, incomplete data, and malformed model responses return `502`; timeouts return `504`. Failed classifications are not saved, and later requests can proceed. Neither the API nor client automatically retries paid analysis. After a client timeout or disconnect, check history before resubmitting because the API may already have saved the result.
 
 ### Example request and response
 
