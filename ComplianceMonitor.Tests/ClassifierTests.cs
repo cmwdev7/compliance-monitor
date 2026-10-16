@@ -41,6 +41,47 @@ public class ClassifierTests
         Assert.Null(handler.Input);
     }
 
+    [Theory]
+    [InlineData("No guidelines exist for this case.", 1.0)]
+    [InlineData("No guidelines exist for ticket closure. Servers must restart weekly.", 0.0)]
+    [InlineData("No guidelines exist for ticket closure; Servers must restart weekly.", 0.0)]
+    [InlineData("No guidelines exist for ticket closure\nServers must restart weekly.", 0.0)]
+    public async Task AbsenceShortcutRequiresAStandaloneStatement(string guideline, double confidence)
+    {
+        var handler = new FakeHandler(.99);
+        var result = await Create(handler).ClassifyAsync("Restarted servers", guideline);
+        Assert.Equal("UNCLEAR", result.Result);
+        Assert.Equal(confidence, result.Confidence);
+        Assert.Equal(0, handler.Calls);
+    }
+
+    [Fact]
+    public async Task AbsencePrefixDoesNotBypassAMandatoryClause()
+    {
+        var handler = new FakeHandler(.99);
+        var result = await Create(handler).ClassifyAsync("Restarted servers",
+            "No guidelines exist for ticket closure and Servers MUST restart weekly.");
+        Assert.Equal("DEVIATES", result.Result);
+        Assert.Equal(1, handler.Calls);
+    }
+
+    [Theory]
+    [InlineData("must")]
+    [InlineData("MUST")]
+    [InlineData("shall")]
+    [InlineData("SHALL")]
+    public async Task CoordinatedHypothesesRemoveEveryMandatoryModal(string modal)
+    {
+        var handler = new FakeHandler(.95);
+        await Create(handler).ClassifyAsync("Restarted servers and reviewed logs",
+            $"Servers {modal} restart and Operators {modal} review logs");
+        Assert.Equal(new[]
+        {
+            "The reported action establishes that Servers restart",
+            "The reported action establishes that Operators review logs"
+        }, handler.Labels);
+    }
+
     [Fact]
     public void ExtractsCompoundWithoutSplittingObjectLists()
     {
@@ -211,6 +252,7 @@ public class ClassifierTests
     private sealed class FakeHandler(double score, HttpStatusCode status = HttpStatusCode.OK, bool empty = false, string? body = null, double[]? perLabelScores = null, bool reverse = false, Func<CancellationToken, Task>? beforeResponse = null) : HttpMessageHandler
     {
         public string? Input { get; private set; }
+        public string?[] Labels { get; private set; } = [];
         public int LabelCount { get; private set; }
         public int Calls { get; private set; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -223,6 +265,7 @@ public class ClassifierTests
             Assert.True(parameters.GetProperty("multi_label").GetBoolean());
             Assert.Equal("{}", parameters.GetProperty("hypothesis_template").GetString());
             var labels = parameters.GetProperty("candidate_labels").EnumerateArray().Select(x => x.GetString()).ToArray();
+            Labels = labels;
             LabelCount = labels.Length;
             var results = labels.Select((label, index) => new { label, score = perLabelScores?[index] ?? score }).ToArray();
             if (reverse) Array.Reverse(results);

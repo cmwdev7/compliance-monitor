@@ -19,9 +19,10 @@ public class HuggingFaceComplianceClassifier(
         string guideline,
         CancellationToken cancellationToken = default)
     {
-        if (Regex.IsMatch(
+        if (!Regex.IsMatch(guideline, @"\b(?:must|shall)\b", RegexOptions.IgnoreCase)
+            && Regex.IsMatch(
                 guideline.Trim(),
-                @"^(?:No (?:applicable )?guidelines? (?:exist|exists|apply)|No applicable policy)(?: for .+)?[.!]?$",
+                @"^(?:No (?:applicable )?guidelines? (?:exist|exists|apply)|No applicable policy)(?: for [^.!;\r\n]+)?[.!]?\z",
                 RegexOptions.IgnoreCase))
             return new("UNCLEAR", 1.0);
 
@@ -35,7 +36,7 @@ public class HuggingFaceComplianceClassifier(
 
         // Independent entailment scores are model evidence scores, not probabilities of compliance.
         var labels = requirements
-            .Select(r => $"The reported action establishes that {r.Replace(" must ", " ")}")
+            .Select(r => $"The reported action establishes that {Regex.Replace(r, @"\s+(?:must|shall)\s+", " ", RegexOptions.IgnoreCase)}")
             .Distinct(StringComparer.Ordinal)
             .ToArray();
 
