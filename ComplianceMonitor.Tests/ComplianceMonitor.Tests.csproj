@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\ComplianceMonitor.Api\ComplianceMonitor.Api.csproj" />
+    <ProjectReference Include="..\ComplianceMonitor.Client\ComplianceMonitor.Client.csproj" />
   </ItemGroup>
 
 </Project>
