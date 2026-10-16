@@ -82,23 +82,24 @@ app.MapPost("/analyze", async (
     return Results.Ok(result);
 });
 
-app.MapGet("/history", async (ComplianceDbContext db) =>
+app.MapGet("/history", async (ComplianceDbContext db, CancellationToken cancellationToken) =>
 {
     var history = await db.Analyses
         .AsNoTracking()
         .OrderByDescending(record => record.Timestamp)
+        .ThenByDescending(record => record.Id)
         .Select(record => new AnalyzeResponse(
             record.Action,
             record.Guideline,
             record.Result,
             record.Confidence,
             record.Timestamp))
-        .ToListAsync();
+        .ToListAsync(cancellationToken);
 
     return Results.Ok(history);
 });
 
-app.MapGet("/summary", async (ComplianceDbContext db) =>
+app.MapGet("/summary", async (ComplianceDbContext db, CancellationToken cancellationToken) =>
 {
     var counts = await db.Analyses
         .AsNoTracking()
@@ -108,7 +109,7 @@ app.MapGet("/summary", async (ComplianceDbContext db) =>
             Result = group.Key,
             Count = group.Count()
         })
-        .ToListAsync();
+        .ToListAsync(cancellationToken);
 
     var byResult = new Dictionary<string, int>
     {
