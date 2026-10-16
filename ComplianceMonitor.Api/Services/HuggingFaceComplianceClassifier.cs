@@ -1,117 +1,52 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ComplianceMonitor.Api.Models;
 
 namespace ComplianceMonitor.Api.Services;
 
-public class HuggingFaceComplianceClassifier : IComplianceClassifier
+public class HuggingFaceComplianceClassifier(HttpClient httpClient, IConfiguration configuration) : IComplianceClassifier
 {
-    private const string Url =
-        "https://router.huggingface.co/hf-inference/models/facebook/bart-large-mnli";
+    private const string Url = "https://router.huggingface.co/hf-inference/models/facebook/bart-large-mnli";
+    private const double EvidenceThreshold = 0.55;
 
-    private readonly HttpClient _httpClient;
-    private readonly IConfiguration _configuration;
-
-    public HuggingFaceComplianceClassifier(
-        HttpClient httpClient,
-        IConfiguration configuration)
+    public async Task<ClassificationResult> ClassifyAsync(string action, string guideline, CancellationToken cancellationToken = default)
     {
-        _httpClient = httpClient;
-        _configuration = configuration;
-    }
+        if (Regex.IsMatch(guideline.Trim(), @"^(?:No (?:applicable )?guidelines? (?:exist|exists|apply)|No applicable policy)(?: for .+)?[.!]?$", RegexOptions.IgnoreCase))
+            return new("UNCLEAR", 1.0);
+        var requirements = RequirementExtractor.Extract(guideline);
+        if (requirements.Length == 0) return new("UNCLEAR", 0.0);
+        var token = configuration["HuggingFace:Token"];
+        if (string.IsNullOrWhiteSpace(token)) throw new InvalidOperationException("Hugging Face token is not configured.");
 
-    public async Task<ClassificationResult> ClassifyAsync(
-        string action,
-        string guideline,
-        CancellationToken cancellationToken = default)
-    {
-        // No applicable policy means compliance cannot be determined.
-        if (guideline.Contains(
-                "No guidelines exist",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            return new ClassificationResult("UNCLEAR", 1.0);
-        }
-
-        var token = _configuration["HuggingFace:Token"];
-
-        if (string.IsNullOrWhiteSpace(token))
-        {
-            throw new InvalidOperationException(
-                "Hugging Face token is not configured.");
-        }
-
-        var payload = new
-        {
-            inputs = $"Guideline: {guideline}\nReported action: {action}",
-            parameters = new
-            {
-                candidate_labels = new[]
-                {
-                    "the reported action complies with the guideline",
-                    "the reported action violates the guideline",
-                    "there is insufficient information to determine compliance"
-                },
-                multi_label = false
-            }
-        };
-
+        // Independent entailment scores are model evidence scores, not probabilities of compliance.
+        var labels = requirements.Select(r => $"The reported action establishes that {r.Replace(" must ", " ")}").ToArray();
         using var request = new HttpRequestMessage(HttpMethod.Post, Url)
         {
-            Content = JsonContent.Create(payload)
-        };
-
-        request.Headers.Authorization =
-            new AuthenticationHeaderValue("Bearer", token);
-
-        using var response = await _httpClient.SendAsync(
-            request,
-            cancellationToken);
-
-        response.EnsureSuccessStatusCode();
-
-        using var document = await JsonDocument.ParseAsync(
-            await response.Content.ReadAsStreamAsync(cancellationToken),
-            cancellationToken: cancellationToken);
-
-        var root = document.RootElement;
-
-        if (root.ValueKind != JsonValueKind.Array ||
-            root.GetArrayLength() == 0)
-        {
-            throw new InvalidOperationException(
-                "Unexpected Hugging Face response.");
-        }
-
-        var best = root.EnumerateArray()
-            .Select(item => new
+            Content = JsonContent.Create(new
             {
-                Label = item.GetProperty("label").GetString() ?? "",
-                Score = item.GetProperty("score").GetDouble()
+                inputs = action,
+                parameters = new { candidate_labels = labels, hypothesis_template = "{}", multi_label = true }
             })
-            .OrderByDescending(item => item.Score)
-            .First();
-
-        string result;
-
-        if (best.Score < 0.55)
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
+        try
         {
-            result = "UNCLEAR";
+            var scores = document.RootElement.EnumerateArray().ToDictionary(x => x.GetProperty("label").GetString()!, x => x.GetProperty("score").GetDouble());
+            if (scores.Count != labels.Length || labels.Any(l => !scores.ContainsKey(l)) || scores.Values.Any(s => !double.IsFinite(s) || s < 0 || s > 1))
+                throw new InvalidOperationException("Unexpected Hugging Face response.");
+            var weakest = labels.Min(l => scores[l]);
+            // Missing recurrence evidence overrides even a high entailment score under the strict policy.
+            if (requirements.Any(r => !RequirementExtractor.HasRecurrenceEvidence(r, action))) return new("DEVIATES", weakest);
+            return new(weakest >= EvidenceThreshold ? "COMPLIES" : "DEVIATES", weakest);
         }
-        else if (best.Label.Contains("violates"))
+        catch (Exception ex) when (ex is KeyNotFoundException or InvalidOperationException or ArgumentException)
         {
-            result = "DEVIATES";
+            throw new InvalidOperationException("Unexpected Hugging Face response.", ex);
         }
-        else if (best.Label.Contains("complies"))
-        {
-            result = "COMPLIES";
-        }
-        else
-        {
-            result = "UNCLEAR";
-        }
-
-        return new ClassificationResult(result, best.Score);
     }
 }
