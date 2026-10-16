@@ -6,6 +6,21 @@ Built with a .NET 10 Minimal API, EF Core SQLite, and hosted `facebook/bart-larg
 
 SQLite provides local persistence. The API is intended for local use: endpoints do not require authentication, and history returns all stored analyses.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    Client[Console client] --> API[Minimal API]
+    API --> Classifier[Compliance classifier]
+    Classifier --> Rules[Requirement extraction]
+    Classifier --> HF[Hugging Face / BART]
+    HF -->|Evidence scores| Classifier
+    Classifier -->|Policy result| API
+    API --> DB[(SQLite)]
+```
+
+Analysis extracts requirements, obtains model evidence scores, and applies the application's compliance policy before saving a successful result. Absent or unevaluable guidelines are handled locally. History and summary read SQLite without invoking the model.
+
 ## Prerequisites
 
 ### Console client
