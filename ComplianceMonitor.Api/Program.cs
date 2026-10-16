@@ -6,7 +6,7 @@ using Microsoft.EntityFrameworkCore;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddDbContext<ComplianceDbContext>(options =>
-    options.UseSqlite("Data Source=compliance.db"));
+    options.UseSqlite(builder.Configuration.GetConnectionString("Compliance") ?? "Data Source=compliance.db"));
 
 builder.Services.AddHttpClient<
     IComplianceClassifier,
@@ -53,6 +53,11 @@ app.MapPost("/analyze", async (
         return Results.Problem(
             "The classification service timed out.",
             statusCode: 504);
+    }
+
+    catch (Exception ex) when (ex is InvalidOperationException or System.Text.Json.JsonException)
+    {
+        return Results.Problem("The classification service returned an invalid response or is not configured.", statusCode: 502);
     }
 
     var record = new AnalysisRecord
