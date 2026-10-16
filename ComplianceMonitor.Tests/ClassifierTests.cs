@@ -74,9 +74,24 @@ public class ClassifierTests
     [Fact]
     public async Task RejectsMissingLabels() => await Assert.ThrowsAsync<InvalidOperationException>(() => Create(new FakeHandler(.9, empty: true)).ClassifyAsync("Action", "Servers must restart"));
 
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("[null]")]
+    [InlineData("[{\"label\":12,\"score\":0.9}]")]
+    [InlineData("[{\"label\":\"unexpected\",\"score\":0.9}]")]
+    [InlineData("[{\"label\":\"The reported action establishes that Servers restart\",\"score\":\"0.9\"}]")]
+    [InlineData("[{\"label\":\"The reported action establishes that Servers restart\",\"score\":1.1}]")]
+    [InlineData("[{\"label\":\"The reported action establishes that Servers restart\",\"score\":-0.1}]")]
+    [InlineData("[{\"label\":\"The reported action establishes that Servers restart\"}]")]
+    [InlineData("[{\"label\":\"The reported action establishes that Servers restart\",\"score\":0.9},{\"label\":\"The reported action establishes that Servers restart\",\"score\":0.8}]")]
+    public async Task RejectsMalformedResponseContracts(string body)
+    {
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Create(new FakeHandler(.9, body: body)).ClassifyAsync("Action", "Servers must restart"));
+    }
+
     private static HuggingFaceComplianceClassifier Create(FakeHandler handler) => new(new HttpClient(handler), new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["HuggingFace:Token"] = "test-placeholder" }).Build());
 
-    private sealed class FakeHandler(double score, HttpStatusCode status = HttpStatusCode.OK, bool empty = false) : HttpMessageHandler
+    private sealed class FakeHandler(double score, HttpStatusCode status = HttpStatusCode.OK, bool empty = false, string? body = null) : HttpMessageHandler
     {
         public string? Input { get; private set; }
         public int LabelCount { get; private set; }
@@ -89,7 +104,7 @@ public class ClassifierTests
             Assert.Equal("{}", parameters.GetProperty("hypothesis_template").GetString());
             var labels = parameters.GetProperty("candidate_labels").EnumerateArray().Select(x => x.GetString()).ToArray();
             LabelCount = labels.Length;
-            return new HttpResponseMessage(status) { Content = JsonContent.Create(empty ? [] : labels.Select(label => new { label, score }).ToArray()) };
+            return new HttpResponseMessage(status) { Content = body is null ? JsonContent.Create(empty ? [] : labels.Select(label => new { label, score }).ToArray()) : new StringContent(body) };
         }
     }
 }

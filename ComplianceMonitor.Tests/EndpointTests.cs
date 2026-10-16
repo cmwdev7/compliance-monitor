@@ -70,6 +70,22 @@ public class EndpointTests
         Assert.Empty((await client.GetFromJsonAsync<AnalyzeResponse[]>("/history"))!);
     }
 
+    [Fact]
+    public async Task EqualTimestampsUseNewestIdFirst()
+    {
+        using var factory = new Factory();
+        using var client = factory.CreateClient();
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ComplianceDbContext>();
+        var timestamp = DateTime.UtcNow;
+        db.Analyses.AddRange(
+            new AnalysisRecord { Action = "First", Guideline = "Rule", Result = "COMPLIES", Confidence = .9, Timestamp = timestamp },
+            new AnalysisRecord { Action = "Second", Guideline = "Rule", Result = "COMPLIES", Confidence = .9, Timestamp = timestamp });
+        await db.SaveChangesAsync();
+        var history = (await client.GetFromJsonAsync<AnalyzeResponse[]>("/history"))!;
+        Assert.Equal(new[] { "Second", "First" }, history.Select(x => x.Action));
+    }
+
     [LiveAcceptanceFact]
     public async Task SuppliedCasesPassLiveAcceptance()
     {
